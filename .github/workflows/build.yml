@@ -1,0 +1,725 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Buat proyek dari build.yml ini
+        run: |
+          set -e
+          mkdir -p HiOS-StackRecents && cd HiOS-StackRecents
+          echo "PROJECT_DIR=$PWD" >> "$GITHUB_ENV"
+          mkdir -p "$(dirname settings.gradle.kts)"
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://api.xposed.info/") {
+                      content { includeGroup("de.robv.android.xposed") }
+                  }
+              }
+          }
+
+          rootProject.name = "HiOS-StackRecents"
+          include(":app")
+          EOF
+          mkdir -p "$(dirname build.gradle.kts)"
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+          }
+          EOF
+          mkdir -p "$(dirname gradle.properties)"
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          EOF
+          mkdir -p "$(dirname app/build.gradle.kts)"
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+          }
+
+          android {
+              namespace = "io.hios.stackrecents"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "io.hios.stackrecents"
+                  minSdk = 28
+                  targetSdk = 34
+                  versionCode = 5
+                  versionName = "1.4"
+              }
+
+              signingConfigs {
+                  create("release") {
+                      storeFile = rootProject.file("keystore/hios-stackrecents.jks")
+                      storePassword = "hiosstack"
+                      keyAlias = "hios"
+                      keyPassword = "hiosstack"
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              compileOnly("de.robv.android.xposed:api:82")
+          }
+          EOF
+          mkdir -p "$(dirname app/src/main/AndroidManifest.xml)"
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name">
+
+                  <meta-data
+                      android:name="xposedmodule"
+                      android:value="true" />
+                  <meta-data
+                      android:name="xposeddescription"
+                      android:value="Recent apps bertumpuk untuk HiOS Launcher 14 dan 15" />
+                  <meta-data
+                      android:name="xposedminversion"
+                      android:value="82" />
+                  <meta-data
+                      android:name="xposedscope"
+                      android:resource="@array/xposed_scope" />
+              </application>
+          </manifest>
+          EOF
+          mkdir -p "$(dirname app/src/main/res/values/strings.xml)"
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">HiOS Stack Recents</string>
+          </resources>
+          EOF
+          mkdir -p "$(dirname app/src/main/res/values/arrays.xml)"
+          cat > app/src/main/res/values/arrays.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string-array name="xposed_scope">
+                  <item>com.transsion.hilauncher</item>
+              </string-array>
+          </resources>
+          EOF
+          mkdir -p "$(dirname app/src/main/assets/xposed_init)"
+          cat > app/src/main/assets/xposed_init <<'EOF'
+          io.hios.stackrecents.Main
+          EOF
+          mkdir -p "$(dirname app/src/main/java/io/hios/stackrecents/Main.java)"
+          cat > app/src/main/java/io/hios/stackrecents/Main.java <<'EOF'
+          package io.hios.stackrecents;
+
+          import android.os.SystemClock;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.ViewTreeObserver;
+
+          import java.lang.ref.WeakReference;
+          import java.util.Locale;
+          import java.util.WeakHashMap;
+
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodHook;
+          import de.robv.android.xposed.XposedBridge;
+          import de.robv.android.xposed.XposedHelpers;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+
+          /**
+           * HiOS Stack Recents: recent apps ditumpuk di HiOS Launcher 15.
+           *
+           * Kartu di kiri (lebih lama) menumpuk di belakang kartu tengah, kartu di kanan
+           * ukurannya sama dengan kartu tengah.
+           */
+          public class Main implements IXposedHookLoadPackage {
+
+              private static final String TAG = "[HiOSStackRecents] ";
+              private static final String TARGET_PKG = "com.transsion.hilauncher";
+              /** Nama kelas berbeda tiap versi: HiOS 15 dulu, lalu HiOS 14. */
+              private static final String[] RECENTS_VIEW_NAMES = {
+                      "com.android.quickstep.views.RecentsView",
+                      "com.android.quickstep.src.com.android.quickstep.views.RecentsView"
+              };
+              private static final String[] TASK_VIEW_NAMES = {
+                      "com.android.quickstep.views.TaskView",
+                      "com.android.quickstep.src.com.android.quickstep.views.TaskView"
+              };
+
+              // ---- parameter efek -------------------------------------------------
+              /** Seberapa jauh tumpukan mengintip di kiri (dikali lebar RecentsView). */
+              private static final float PEEK = 0.25f;
+              /** Kecepatan tumpukan merapat. */
+              private static final float PEEK_RATE = 1.3f;
+              /** Pengecilan kartu kiri per satu lebar kartu. */
+              private static final float SCALE_STEP = 0.04f;
+              /** Skala minimum kartu kiri. */
+              private static final float MIN_SCALE = 0.85f;
+              /** Skala kartu kanan (1.0 = sama dengan kartu tengah). */
+              private static final float RIGHT_SCALE = 1.0f;
+              /** Jarak antar kartu kanan (dikali lebar RecentsView sudah dibagi step). */
+              private static final float RIGHT_STEP = 0.9f;
+              /** Kartu kiri mulai memudar setelah sejauh ini (dalam lebar kartu). */
+              private static final float FADE_START = 3.0f;
+              private static final float FADE_RATE = 0.5f;
+              /** Durasi geser halus (ms) saat kartu ditutup dan kartu lain pindah ke tengah. */
+              private static final long SMOOTH_MS = 320L;
+              /** Data frame yang lebih lama dari ini (ms) dianggap basi dan tidak dipakai. */
+              private static final long STALE_MS = 250L;
+              /** Kartu yang baru saja lenyap (ditutup) dianggap "hantu" selama ini (ms). */
+              private static final long GHOST_MS = 600L;
+
+              // ---- diagnostik -----------------------------------------------------
+              /** Set false kalau log sudah tidak dibutuhkan. */
+              private static final boolean DEBUG = true;
+              /** Jumlah pemanggilan yang dicatat setelah jumlah kartu berubah. */
+              private static final int DEBUG_CALLS = 70;
+
+              private static final int SRC_DRAW = 0;
+              private static final int SRC_SCROLL = 1;
+              private static final int SRC_LAYOUT = 2;
+              private static final int SRC_CURVE = 3;
+              private static final int SRC_FRAME = 4;
+              private static final String[] SRC_NAME = {"draw", "scroll", "layout", "curve", "frame"};
+
+              private static final WeakHashMap<View, Boolean> TOUCHED = new WeakHashMap<>();
+              private static final WeakHashMap<View, FrameHook> FRAME_HOOKS = new WeakHashMap<>();
+              private static final WeakHashMap<View, Integer> LAST_COUNT = new WeakHashMap<>();
+              private static final WeakHashMap<View, CardState> STATES = new WeakHashMap<>();
+              private static final WeakHashMap<View, Long> TRANS_START = new WeakHashMap<>();
+              private static final WeakHashMap<View, Boolean> GHOST_ACTIVE = new WeakHashMap<>();
+
+              /** Tampilan terakhir sebuah kartu, dipakai sebagai titik awal animasi halus. */
+              private static final class CardState {
+                  float lastLeft;
+                  float lastScale = 1f;
+                  float lastAlpha = 1f;
+                  long lastTime;
+                  long lastVisible;
+                  float startLeft;
+                  float startScale = 1f;
+                  float startAlpha = 1f;
+                  boolean hasStart;
+              }
+
+              private static Class<?> sTaskView;
+              private static Class<?> sRecentsView;
+              private static boolean sBusy = false;
+              private static boolean sDisabled = false;
+              private static int sDebugLeft = 0;
+
+              @Override
+              public void handleLoadPackage(LoadPackageParam lpparam) {
+                  if (!TARGET_PKG.equals(lpparam.packageName)) return;
+
+                  ClassLoader cl = lpparam.classLoader;
+                  Class<?> recents = findFirst(RECENTS_VIEW_NAMES, cl);
+                  sTaskView = findFirst(TASK_VIEW_NAMES, cl);
+                  sRecentsView = recents;
+                  if (recents == null || sTaskView == null) {
+                      XposedBridge.log(TAG + "RecentsView/TaskView tidak ditemukan, modul tidak aktif");
+                      return;
+                  }
+
+                  try {
+                      XposedHelpers.findAndHookMethod(recents, "dispatchDraw", android.graphics.Canvas.class,
+                              new Hook(SRC_DRAW, true));
+                  } catch (Throwable t) {
+                      XposedBridge.log(TAG + "hook dispatchDraw gagal: " + t);
+                  }
+                  try {
+                      XposedHelpers.findAndHookMethod(recents, "onScrollChanged",
+                              int.class, int.class, int.class, int.class, new Hook(SRC_SCROLL, false));
+                  } catch (Throwable t) {
+                      XposedBridge.log(TAG + "hook onScrollChanged gagal: " + t);
+                  }
+                  try {
+                      XposedHelpers.findAndHookMethod(recents, "onLayout",
+                              boolean.class, int.class, int.class, int.class, int.class,
+                              new Hook(SRC_LAYOUT, false));
+                  } catch (Throwable t) {
+                      XposedBridge.log(TAG + "hook onLayout gagal: " + t);
+                  }
+                  try {
+                      XposedHelpers.findAndHookMethod(recents, "updateCurveProperties",
+                              new Hook(SRC_CURVE, false));
+                  } catch (NoSuchMethodError t) {
+                      // hanya ada di HiOS 15; di HiOS 14 efek tetap jalan lewat hook lain
+                      XposedBridge.log(TAG + "updateCurveProperties tidak ada, dilewati");
+                  } catch (Throwable t) {
+                      XposedBridge.log(TAG + "hook updateCurveProperties gagal: " + t);
+                  }
+
+                  XposedBridge.log(TAG + "aktif untuk " + TARGET_PKG + " (" + recents.getName() + ")");
+              }
+
+              private static Class<?> findFirst(String[] names, ClassLoader cl) {
+                  for (String name : names) {
+                      Class<?> c = XposedHelpers.findClassIfExists(name, cl);
+                      if (c != null) return c;
+                  }
+                  return null;
+              }
+
+              // ---------------------------------------------------------------------
+
+              private static final class Hook extends XC_MethodHook {
+                  private final int src;
+                  private final boolean before;
+
+                  Hook(int src, boolean before) {
+                      this.src = src;
+                      this.before = before;
+                  }
+
+                  @Override
+                  protected void beforeHookedMethod(MethodHookParam param) {
+                      if (before) guard(param.thisObject, src);
+                  }
+
+                  @Override
+                  protected void afterHookedMethod(MethodHookParam param) {
+                      if (!before) guard(param.thisObject, src);
+                  }
+              }
+
+              /**
+               * Dipanggil sebelum setiap frame digambar. Launcher menjalankan animasi
+               * (misalnya saat kartu ditutup) tanpa memanggil hook di atas, jadi efek
+               * tumpukan dipasang ulang di sini supaya tidak hilang sementara.
+               */
+              private static final class FrameHook
+                      implements ViewTreeObserver.OnPreDrawListener, View.OnAttachStateChangeListener {
+                  private final WeakReference<ViewGroup> ref;
+                  private ViewTreeObserver observer;
+
+                  FrameHook(ViewGroup view) {
+                      ref = new WeakReference<>(view);
+                  }
+
+                  void start(ViewGroup view) {
+                      stop();
+                      observer = view.getViewTreeObserver();
+                      if (observer.isAlive()) observer.addOnPreDrawListener(this);
+                  }
+
+                  void stop() {
+                      if (observer != null) {
+                          if (observer.isAlive()) observer.removeOnPreDrawListener(this);
+                          observer = null;
+                      }
+                  }
+
+                  @Override
+                  public boolean onPreDraw() {
+                      ViewGroup view = ref.get();
+                      if (view == null) {
+                          stop();
+                      } else {
+                          guard(view, SRC_FRAME);
+                      }
+                      return true;
+                  }
+
+                  @Override
+                  public void onViewAttachedToWindow(View v) {
+                      if (v instanceof ViewGroup) start((ViewGroup) v);
+                  }
+
+                  @Override
+                  public void onViewDetachedFromWindow(View v) {
+                      stop();
+                  }
+              }
+
+              private static void ensureFrameHook(ViewGroup rv) {
+                  if (FRAME_HOOKS.containsKey(rv)) return;
+                  FrameHook hook = new FrameHook(rv);
+                  FRAME_HOOKS.put(rv, hook);
+                  rv.addOnAttachStateChangeListener(hook);
+                  if (rv.isAttachedToWindow()) hook.start(rv);
+              }
+
+              // ---------------------------------------------------------------------
+
+              private static void guard(Object o, int src) {
+                  if (sDisabled) return;
+                  try {
+                      applyStack(o, src);
+                  } catch (Throwable t) {
+                      sDisabled = true;
+                      XposedBridge.log(TAG + "error, efek dimatikan: " + t);
+                      XposedBridge.log(t);
+                  }
+              }
+
+              private static boolean isTask(View v) {
+                  return v != null && sTaskView != null && sTaskView.isInstance(v);
+              }
+
+              /**
+               * Saat kartu ditutup, jumlah anak berkurang dan layout langsung bergeser.
+               * Tampilan terakhir tiap kartu disimpan sebagai titik awal, lalu selama
+               * SMOOTH_MS posisinya digeser halus ke posisi tumpukan yang baru.
+               */
+              private static void beginSmooth(ViewGroup rv, int count, long now) {
+                  for (int i = 0; i < count; i++) {
+                      View c = rv.getChildAt(i);
+                      if (!isTask(c)) continue;
+                      CardState st = STATES.get(c);
+                      if (st == null) continue;
+                      if (now - st.lastTime <= STALE_MS) {
+                          st.startLeft = st.lastLeft;
+                          st.startScale = st.lastScale;
+                          st.startAlpha = st.lastAlpha;
+                          st.hasStart = true;
+                      } else {
+                          st.hasStart = false;
+                      }
+                  }
+                  TRANS_START.put(rv, now);
+              }
+
+              private static void place(View c, CardState st, boolean blend, float ease, float scrollX,
+                                        float tx, float scale, float alpha, float z) {
+                  if (blend) {
+                      // posisi dihitung di koordinat layar (dikurangi scrollX), supaya
+                      // perubahan scroll saat kartu dihapus tidak membuat kartu loncat
+                      float left = c.getLeft();
+                      float vis = st.startLeft + (left + tx - scrollX - st.startLeft) * ease;
+                      tx = vis + scrollX - left;
+                      scale = st.startScale + (scale - st.startScale) * ease;
+                      alpha = st.startAlpha + (alpha - st.startAlpha) * ease;
+                  }
+                  c.setTranslationX(tx);
+                  c.setScaleX(scale);
+                  c.setScaleY(scale);
+                  c.setAlpha(alpha);
+                  c.setTranslationZ(z);
+                  TOUCHED.put(c, Boolean.TRUE);
+              }
+
+              private static void record(View c, CardState st, float scrollX, long now) {
+                  st.lastLeft = c.getLeft() + c.getTranslationX() - scrollX;
+                  st.lastScale = c.getScaleX();
+                  st.lastAlpha = c.getAlpha();
+                  st.lastTime = now;
+                  if (st.lastAlpha >= 0.5f) st.lastVisible = now;
+              }
+
+              /** Kartu di tengah yang tiba-tiba transparan = kartu yang sedang selesai ditutup. */
+              private static View findGhost(ViewGroup rv, int count, float centerX, long now) {
+                  for (int i = 0; i < count; i++) {
+                      View c = rv.getChildAt(i);
+                      if (!isTask(c)) continue;
+                      int cw = c.getWidth();
+                      if (cw <= 0) continue;
+                      float d = c.getLeft() + cw / 2f - centerX;
+                      if (Math.abs(d) / cw >= 0.02f || c.getAlpha() >= 0.05f) continue;
+                      CardState gs = STATES.get(c);
+                      if (gs != null && now - gs.lastVisible <= GHOST_MS) return c;
+                  }
+                  return null;
+              }
+
+              /** Kartu yang akan jadi kartu tengah: tetangga kanan, kalau tidak ada tetangga kiri. */
+              private static View findHeir(ViewGroup rv, int count, View ghost) {
+                  View right = null;
+                  View left = null;
+                  for (int i = 0; i < count; i++) {
+                      View c = rv.getChildAt(i);
+                      if (c == ghost || !isTask(c)) continue;
+                      if (c.getLeft() > ghost.getLeft()) {
+                          if (right == null || c.getLeft() < right.getLeft()) right = c;
+                      } else {
+                          if (left == null || c.getLeft() > left.getLeft()) left = c;
+                      }
+                  }
+                  return right != null ? right : left;
+              }
+
+              private static void applyStack(Object o, int src) {
+                  if (sBusy || !(o instanceof ViewGroup)) return;
+                  if (sRecentsView != null && !sRecentsView.isInstance(o)) return;
+
+                  ViewGroup rv = (ViewGroup) o;
+                  int w = rv.getWidth();
+                  int h = rv.getHeight();
+                  int count = rv.getChildCount();
+
+                  // Hanya mode potret; selain itu kembalikan tampilan asli.
+                  if (w <= 0 || h <= w) {
+                      for (int i = 0; i < count; i++) reset(rv.getChildAt(i));
+                      return;
+                  }
+
+                  ensureFrameHook(rv);
+
+                  long now = SystemClock.uptimeMillis();
+                  float scrollX = rv.getScrollX();
+                  boolean removed = false;
+                  Integer last = LAST_COUNT.get(rv);
+                  if (last == null || last != count) {
+                      LAST_COUNT.put(rv, count);
+                      if (last != null && count < last) {
+                          removed = true;
+                          beginSmooth(rv, count, now);
+                      }
+                      if (DEBUG && last != null) {
+                          sDebugLeft = DEBUG_CALLS;
+                          XposedBridge.log(TAG + "dbg jumlah anak " + last + " -> " + count);
+                      }
+                  }
+
+                  // kartu yang sedang ditutup sudah lenyap tapi belum dihapus launcher:
+                  // kartu penggantinya mulai bergeser ke tengah sekarang, tidak menunggu
+                  View ghost = findGhost(rv, count, scrollX + w / 2f, now);
+                  View heir = ghost != null ? findHeir(rv, count, ghost) : null;
+                  Boolean ghostFlag = GHOST_ACTIVE.get(rv);
+                  boolean ghostWasOn = ghostFlag != null && ghostFlag;
+                  if (ghost != null && !ghostWasOn) {
+                      GHOST_ACTIVE.put(rv, Boolean.TRUE);
+                      beginSmooth(rv, count, now);
+                  } else if (ghost == null && ghostWasOn) {
+                      GHOST_ACTIVE.put(rv, Boolean.FALSE);
+                      if (!removed) beginSmooth(rv, count, now);
+                  }
+
+                  // progres animasi halus (decelerate)
+                  boolean smoothing = false;
+                  float ease = 1f;
+                  Long began = TRANS_START.get(rv);
+                  if (began != null) {
+                      float p = (now - began) / (float) SMOOTH_MS;
+                      if (p >= 1f) {
+                          TRANS_START.remove(rv);
+                      } else {
+                          smoothing = true;
+                          float inv = 1f - Math.max(0f, p);
+                          ease = 1f - inv * inv * inv;
+                      }
+                  }
+
+                  StringBuilder dbg = null;
+                  if (DEBUG && sDebugLeft > 0) {
+                      sDebugLeft--;
+                      dbg = new StringBuilder(TAG + "dbg src=" + SRC_NAME[src]
+                              + " scrollX=" + rv.getScrollX() + " w=" + w);
+                  }
+
+                  sBusy = true;
+                  try {
+                      float centerX = scrollX + w / 2f;
+
+                      // jarak antar kartu (selisih left terkecil yang positif)
+                      float step = 0f;
+                      View prev = null;
+                      for (int i = 0; i < count; i++) {
+                          View c = rv.getChildAt(i);
+                          if (!isTask(c)) continue;
+                          if (prev != null) {
+                              int dl = Math.abs(c.getLeft() - prev.getLeft());
+                              if (dl > 0 && (step == 0f || dl < step)) step = dl;
+                          }
+                          prev = c;
+                      }
+                      if (dbg != null) dbg.append(" step=").append((int) step);
+
+                      int shownCards = 0;
+                      for (int i = 0; i < count; i++) {
+                          View c = rv.getChildAt(i);
+                          if (!isTask(c)) continue;
+                          int cw = c.getWidth();
+                          if (cw <= 0) continue;
+
+                          CardState st = STATES.get(c);
+                          if (st == null) {
+                              st = new CardState();
+                              STATES.put(c, st);
+                          }
+                          if (c == ghost) {
+                              record(c, st, scrollX, now);
+                              continue;
+                          }
+                          boolean blend = smoothing && st.hasStart;
+
+                          float d = c.getLeft() + cw / 2f - centerX; // <0 kiri, >0 kanan
+                          float n = Math.abs(d) / cw;
+
+                          float preTx = c.getTranslationX();
+                          float preScale = c.getScaleX();
+                          float preAlpha = c.getAlpha();
+
+                          if (n < 0.02f) {
+                              // kartu tengah: kembali ke tampilan asli (halus kalau sedang transisi)
+                              if (blend && TOUCHED.containsKey(c)) {
+                                  place(c, st, true, ease, scrollX, 0f, 1f, 1f, 0f);
+                              } else {
+                                  reset(c);
+                              }
+                              record(c, st, scrollX, now);
+                              if (dbg != null && shownCards++ < 8) {
+                                  dbg.append(String.format(Locale.US,
+                                          " [#%d L=%d n=%.2f pre(tx=%.0f s=%.2f a=%.2f) RESET]",
+                                          i, c.getLeft(), n, preTx, preScale, preAlpha));
+                              }
+                              continue;
+                          }
+
+                          float tx;
+                          float scale;
+                          float alpha;
+                          if (c == heir) {
+                              // pengganti kartu yang ditutup: langsung menuju tengah
+                              tx = -d;
+                              scale = 1f;
+                              alpha = 1f;
+                              place(c, st, blend, ease, scrollX, tx, scale, alpha, 0f);
+                              record(c, st, scrollX, now);
+                              continue;
+                          }
+                          if (d > 0f) {
+                              // kanan: ukuran sama dengan kartu tengah
+                              float stp = step > 0f ? step : cw * 1.1f;
+                              tx = (cw * RIGHT_STEP / stp - 1f) * d;
+                              scale = RIGHT_SCALE;
+                              alpha = 1f;
+                          } else {
+                              // kiri: menumpuk di belakang kartu tengah
+                              float shown = (float) (PEEK * w * (1.0 - Math.exp(-PEEK_RATE * n)));
+                              tx = -shown - d;
+                              scale = Math.max(MIN_SCALE, 1f - SCALE_STEP * n);
+                              alpha = n <= FADE_START ? 1f
+                                      : Math.max(0f, 1f - (n - FADE_START) * FADE_RATE);
+                          }
+
+                          place(c, st, blend, ease, scrollX, tx, scale, alpha, d / cw * 10f);
+                          record(c, st, scrollX, now);
+
+                          if (dbg != null && shownCards++ < 8) {
+                              dbg.append(String.format(Locale.US,
+                                      " [#%d L=%d n=%.2f%s pre(tx=%.0f s=%.2f a=%.2f) -> tx=%.0f s=%.2f a=%.2f]",
+                                      i, c.getLeft(), n, d > 0 ? "R" : "L",
+                                      preTx, preScale, preAlpha, c.getTranslationX(), c.getScaleX(),
+                                      c.getAlpha()));
+                          }
+                      }
+                  } finally {
+                      sBusy = false;
+                  }
+                  // jaga frame tetap berjalan sampai animasi halus selesai
+                  if (smoothing) rv.postInvalidateOnAnimation();
+                  if (dbg != null) XposedBridge.log(dbg.toString());
+              }
+
+              private static void reset(View v) {
+                  if (v == null) return;
+                  if (TOUCHED.remove(v) == null) return;
+                  v.setTranslationX(0f);
+                  v.setScaleX(1f);
+                  v.setScaleY(1f);
+                  v.setAlpha(1f);
+                  v.setTranslationZ(0f);
+              }
+          }
+          EOF
+          mkdir -p keystore
+          base64 -d > keystore/hios-stackrecents.jks <<'EOF'
+          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
+          +/Fn0VIsIb75y1gCAicQ
+          EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle --no-daemon assembleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HiOS-StackRecents-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
